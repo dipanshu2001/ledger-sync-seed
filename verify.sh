@@ -6,7 +6,10 @@ cd "$(dirname "$0")"
 
 echo "==> compiling"
 rm -rf build/selfcheck && mkdir -p build/selfcheck
-javac -d build/selfcheck $(find src/main/java -name '*.java')
+# The smoke check intentionally remains dependency-free. MongoDB support is
+# compiled and run through Gradle, where the MongoDB driver is available.
+javac -d build/selfcheck $(find src/main/java -name '*.java' \
+  ! -name 'MongoDocumentStore.java' ! -name 'App.java')
 
 echo
 echo "==> running"

@@ -12,14 +12,77 @@ being surprised.
 
 ---
 
+## Build tracking
+
+The implementation plan and durable working notes live in `docs/`:
+
+- `docs/PROJECT_TRACKER.csv` — importable tracker sheet with task dependencies,
+  status, acceptance criteria, and evidence notes.
+- `docs/PROJECT_PLAN.md` — ordered execution plan and definition of done.
+- `docs/DECISION_LOG.md` — decisions, rejected alternatives, evidence, and
+  unresolved questions.
+- `docs/DATA_DECISIONS.md` — choices forced by observations in corpus A.
+- `docs/AI_LEARNING_LOG.md` — AI tools used and concrete mistakes with their
+  corrections.
+
+Update these files as implementation decisions are made; do not rely on
+unrecorded chat history.
+
+### Local MongoDB
+
+The document-store adapter uses MongoDB at `mongodb://localhost:27017`, database
+`ledger`, collection `transactions`. Start MongoDB locally, then run:
+
+```bash
+./gradlew run --args="migrate"
+./gradlew run --args="ingest fixtures/corpus-a.jsonl"
+./gradlew run --args="backfill-mongo"
+./gradlew run --args="check-mongo"
+```
+
+Set `LEDGER_MONGO_URI` to use another local MongoDB URI. The transaction
+document is keyed by account, occurrence time, direction, amount, and
+normalized merchant. It stores the complete normalized transaction plus
+`source_message_ids`. Indexes support account/time retrieval and message-ID
+traceability.
+
+The query plan is:
+
+| Query | Access path |
+|---|---|
+| Account/month, newest first | Compound index on `account_last4, occurred_at`, with a bounded month range and descending sort |
+| Category totals for account | Account index followed by category aggregation in the adapter |
+| Message ID lookup | Multikey index on `source_message_ids` |
+
+The required 100,000-transaction `totalDocsExamined` versus `nReturned`
+measurements are still pending a live local MongoDB benchmark and are not
+invented here.
+
+Functional migration validation uses the same document model with an in-memory
+adapter in tests: dirty SQL rows are canonicalized, the first backfill writes
+one document per transaction, reruns skip equivalent documents, and altered
+amounts or document-only records are reported by `ConsistencyChecker`.
+
+The local MongoDB adapter has also been exercised against `ledger.transactions`:
+the corpus/legacy SQL data backfilled 266 canonical documents, a second run
+wrote 0 and skipped 266, and `check-mongo` reported 0 divergences. The three
+declared access paths were smoke-tested against the populated database:
+account/month returned 103 rows, category totals returned all four categories,
+and source-message lookup returned the matching transaction. Existing
+equivalent indexes are reused, so adapter startup is safe with the manually
+created local indexes.
+
+---
+
 ## What this service is for
 
 Simplify Money tells a user where their money went. To do that, something has to
 read the bank SMS and bank emails sitting on their phone and turn them into a
 ledger the user can trust.
 
-This repository is that something, half-finished, with a live incident open
-against it.
+This repository implements that ingestion and migration workflow. The known
+corpus checkpoint discrepancy and the 100,000-row benchmark are explicitly
+deferred; neither is hidden or replaced with fabricated data.
 
 ---
 
@@ -147,8 +210,21 @@ point, not a bug you have hit.
 6. **`Reports.reconciliation` is not written.**
 7. **`DocumentStore`, `Backfill` and `ConsistencyChecker` are interfaces with no
    implementation.** See below.
-8. **`incident/INC-2026-09-11.md` is open.** Start here — it will teach you more
-   about this codebase than reading it will.
+8. **`incident/INC-2026-09-11.md`** records the resolved water-can incident,
+   blast radius, fix, and prevention steps.
+
+## Release evidence
+
+- Functional tests: `./gradlew test` — 23 tests passed.
+- Dependency-free pipeline: `./gradlew selfCheck` — 522 messages read and 256
+  source-backed transactions produced; the known `₹7,500` gap remains explicit.
+- Mongo migration: `backfill-mongo` wrote 266 canonical documents, a rerun
+  wrote 0 and skipped 266, and `check-mongo` reported 0 divergences.
+- Mongo access paths were smoke-tested against the populated local database:
+  account/month, category totals, and source-message lookup all returned valid
+  results.
+- Deferred: the 100,000-transaction benchmark and correction of the missing
+  source transaction in corpus A.
 
 ---
 

@@ -6,11 +6,13 @@ import in.simplifymoney.ledgersync.model.Category;
 import in.simplifymoney.ledgersync.model.NormalizedTxn;
 import in.simplifymoney.ledgersync.parse.Parsers;
 import in.simplifymoney.ledgersync.store.InMemoryLedgerStore;
+import in.simplifymoney.ledgersync.validation.CheckpointValidator;
 import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.Comparator;
 
 /**
  * Runs the whole pipeline in memory against fixtures/corpus-a.jsonl and prints
@@ -41,6 +43,7 @@ public final class SelfCheck {
         cats.forEach((c, v) -> System.out.printf("  %-9s %12s%n", c, v.toPlainString()));
 
         Map<String, Object> want = Json.parseObject(Files.readString(totals));
+        var checkpointDivergences = CheckpointValidator.compare(ledger, want);
         @SuppressWarnings("unchecked")
         Map<String, Object> accounts = (Map<String, Object>) want.get("accounts");
 
@@ -56,7 +59,9 @@ public final class SelfCheck {
 
             BigDecimal running = opening;
             long n = 0;
-            for (NormalizedTxn t : ledger) {
+            for (NormalizedTxn t : ledger.stream()
+                    .sorted(Comparator.comparing(NormalizedTxn::occurredAt))
+                    .toList()) {
                 if (!t.accountLast4().equals(e.getKey())) continue;
                 n++;
                 running = switch (t.direction()) {
@@ -71,5 +76,11 @@ public final class SelfCheck {
                     running.subtract(closing).toPlainString());
         }
         System.out.println("\nThis is the starting point, not the finish line.");
+        System.out.println("  reconciliation discrepancies: "
+                + ((List<?>) in.simplifymoney.ledgersync.report.Reports
+                .reconciliation(ledger, store.balanceEvidence()).get("discrepancies")).size());
+        System.out.println("  checkpoint divergences: " + checkpointDivergences.size());
+        checkpointDivergences.forEach(d -> System.out.printf("    %s expected %s actual %s%n",
+                d.field(), d.expected(), d.actual()));
     }
 }

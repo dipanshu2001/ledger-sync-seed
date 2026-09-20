@@ -33,4 +33,10 @@ public interface DocumentStore {
     Optional<NormalizedTxn> byMessageId(String messageId);
 
     void save(NormalizedTxn txn);
+
+    /** Removes a document by its transaction identity during migration repair. */
+    void delete(NormalizedTxn txn);
+
+    /** Used by migration verification; not a service query path. */
+    List<NormalizedTxn> all();
 }

@@ -2,6 +2,7 @@ package in.simplifymoney.ledgersync.store;
 
 import in.simplifymoney.ledgersync.model.NormalizedTxn;
 import java.util.List;
+import java.util.Collections;
 
 /**
  * Where transactions live.
@@ -16,4 +17,10 @@ public interface LedgerStore {
     List<NormalizedTxn> all();
 
     long count();
+
+    default void saveBalanceEvidence(BalanceEvidence evidence) {}
+
+    default List<BalanceEvidence> balanceEvidence() {
+        return Collections.emptyList();
+    }
 }

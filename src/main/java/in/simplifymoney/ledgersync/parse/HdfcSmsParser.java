@@ -37,6 +37,11 @@ public final class HdfcSmsParser implements MessageParser {
             "spent on HDFC Bank Card x(?<acct>\\d{4}) at (?<merchant>.+?) "
                     + "on (?<when>\\d{2}-\\d{2}-\\d{2} \\d{2}:\\d{2})\\.");
 
+    private static final Pattern MANDATE = Pattern.compile(
+            "E-mandate!\\s+.+?will be deducted from your HDFC Bank A/c XX(?<acct>\\d{4}) "
+                    + "on (?<when>\\d{2}-\\d{2}-\\d{2}) at (?<time>\\d{2}:\\d{2}) "
+                    + "for (?<merchant>[^.]+)\\.", Pattern.CASE_INSENSITIVE);
+
     @Override
     public boolean supports(RawMessage m) {
         return "sms".equals(m.channel()) && SENDER.equals(m.sender());
@@ -64,7 +69,14 @@ public final class HdfcSmsParser implements MessageParser {
         Matcher card = CARD.matcher(body);
         if (card.find()) {
             return build(m, card.group("acct"), card.group("when"),
-                    Direction.DEBIT, card.group("merchant"));
+                    Direction.DEBIT, card.group("merchant"), false);
+        }
+
+        Matcher mandate = MANDATE.matcher(body);
+        if (mandate.find()) {
+            return build(m, mandate.group("acct"),
+                    mandate.group("when") + " " + mandate.group("time"),
+                    Direction.DEBIT, mandate.group("merchant"));
         }
 
         return Optional.empty();
@@ -72,10 +84,16 @@ public final class HdfcSmsParser implements MessageParser {
 
     private Optional<ParsedTxn> build(RawMessage m, String acct, String when,
                                       Direction dir, String merchant) {
+        return build(m, acct, when, dir, merchant, true);
+    }
+
+    private Optional<ParsedTxn> build(RawMessage m, String acct, String when,
+                                      Direction dir, String merchant,
+                                      boolean hasBalanceEvidence) {
         BigDecimal amount = Amounts.first(m.body());
         OffsetDateTime at = Dates.ist(when);
         if (amount == null || at == null) return Optional.empty();
         return Optional.of(new ParsedTxn(acct, at, dir, amount, merchant.trim(),
-                Amounts.statedBalance(m.body()), m.messageId()));
+                hasBalanceEvidence ? Amounts.statedBalance(m.body()) : null, m.messageId()));
     }
 }

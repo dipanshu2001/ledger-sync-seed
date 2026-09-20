@@ -5,6 +5,8 @@ import in.simplifymoney.ledgersync.json.Json;
 import in.simplifymoney.ledgersync.parse.Parsers;
 import in.simplifymoney.ledgersync.report.Reports;
 import in.simplifymoney.ledgersync.store.SqlLedgerStore;
+import in.simplifymoney.ledgersync.store.Backfill;
+import in.simplifymoney.ledgersync.store.MongoDocumentStore;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -14,6 +16,8 @@ import java.nio.file.Path;
  *   migrate                  apply db/migration/*.sql
  *   ingest  <corpus.jsonl>   read a corpus into the ledger
  *   report  <out-dir>        write ledger.json, summary.json, reconciliation.json
+ *   backfill-mongo           copy SQL ledger into local MongoDB database ledger
+ *   check-mongo              compare SQL ledger with local MongoDB
  */
 public final class App {
 
@@ -55,8 +59,26 @@ public final class App {
                     Files.writeString(out.resolve("summary.json"),
                             Json.writePretty(Reports.summary(ledger)));
                     Files.writeString(out.resolve("reconciliation.json"),
-                            Json.writePretty(Reports.reconciliation(ledger)));
+                            Json.writePretty(Reports.reconciliation(ledger,
+                                    store.balanceEvidence())));
                     System.out.println("wrote 3 files to " + out);
+                }
+            }
+            case "backfill-mongo" -> {
+                try (SqlLedgerStore source = new SqlLedgerStore(DB);
+                     MongoDocumentStore target = new MongoDocumentStore()) {
+                    source.migrate(MIGRATIONS);
+                    System.out.println(new Backfill(source, target).run());
+                }
+            }
+            case "check-mongo" -> {
+                try (SqlLedgerStore source = new SqlLedgerStore(DB);
+                     MongoDocumentStore target = new MongoDocumentStore()) {
+                    source.migrate(MIGRATIONS);
+                    var divergences = new in.simplifymoney.ledgersync.store.ConsistencyChecker(
+                            source, target).check();
+                    divergences.forEach(System.out::println);
+                    System.out.println("divergences: " + divergences.size());
                 }
             }
             default -> {

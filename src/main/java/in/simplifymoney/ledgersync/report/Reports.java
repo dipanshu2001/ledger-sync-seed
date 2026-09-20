@@ -8,6 +8,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
+import java.util.Comparator;
+import in.simplifymoney.ledgersync.store.BalanceEvidence;
 
 /**
  * The two reports the assignment asks for.
@@ -32,19 +34,38 @@ public final class Reports {
             BigDecimal income = ZERO;
             for (NormalizedTxn t : ledger) {
                 if (!t.accountLast4().equals(acct)) continue;
-                if (t.direction() == Direction.DEBIT) spend = spend.add(t.amount());
-                else income = income.add(t.amount());
+                if (t.category() == Category.SPEND) spend = spend.add(t.amount());
+                else if (t.category() == Category.INCOME) income = income.add(t.amount());
             }
 
             Map<String, Object> a = new LinkedHashMap<>();
             a.put("spend", spend.toPlainString());
             a.put("income", income.toPlainString());
-            // TODO micro spends are still counted inside spend, and are not rolled up
-            a.put("micro_count", 0);
-            a.put("micro_total", ZERO.toPlainString());
-            // TODO transfers are still counted as spend and income
-            a.put("transferred_out", ZERO.toPlainString());
-            a.put("transferred_in", ZERO.toPlainString());
+            long microCount = ledger.stream()
+                    .filter(t -> t.accountLast4().equals(acct))
+                    .filter(t -> t.category() == Category.MICRO)
+                    .count();
+            BigDecimal microTotal = ledger.stream()
+                    .filter(t -> t.accountLast4().equals(acct))
+                    .filter(t -> t.category() == Category.MICRO)
+                    .map(NormalizedTxn::amount)
+                    .reduce(ZERO, BigDecimal::add);
+            BigDecimal transferredOut = ledger.stream()
+                    .filter(t -> t.accountLast4().equals(acct))
+                    .filter(t -> t.category() == Category.TRANSFER)
+                    .filter(t -> t.direction() == Direction.DEBIT)
+                    .map(NormalizedTxn::amount)
+                    .reduce(ZERO, BigDecimal::add);
+            BigDecimal transferredIn = ledger.stream()
+                    .filter(t -> t.accountLast4().equals(acct))
+                    .filter(t -> t.category() == Category.TRANSFER)
+                    .filter(t -> t.direction() == Direction.CREDIT)
+                    .map(NormalizedTxn::amount)
+                    .reduce(ZERO, BigDecimal::add);
+            a.put("micro_count", microCount);
+            a.put("micro_total", microTotal.toPlainString());
+            a.put("transferred_out", transferredOut.toPlainString());
+            a.put("transferred_in", transferredIn.toPlainString());
             accounts.put(acct, a);
         }
         Map<String, Object> doc = new LinkedHashMap<>();
@@ -53,7 +74,11 @@ public final class Reports {
     }
 
     public static Map<String, Object> ledgerDocument(List<NormalizedTxn> ledger) {
-        List<Object> rows = ledger.stream().map(t -> {
+        List<Object> rows = ledger.stream()
+                .sorted(Comparator.comparing(NormalizedTxn::accountLast4)
+                        .thenComparing(NormalizedTxn::occurredAt)
+                        .thenComparing(t -> t.sourceMessageIds().get(0)))
+                .map(t -> {
             Map<String, Object> r = new LinkedHashMap<>();
             r.put("account_last4", t.accountLast4());
             r.put("occurred_at", t.occurredAt().toString());
@@ -70,7 +95,45 @@ public final class Reports {
     }
 
     public static Map<String, Object> reconciliation(List<NormalizedTxn> ledger) {
-        throw new UnsupportedOperationException("reconciliation is not implemented");
+        return reconciliation(ledger, List.of());
+    }
+
+    public static Map<String, Object> reconciliation(
+            List<NormalizedTxn> ledger, List<BalanceEvidence> evidence) {
+        List<Object> discrepancies = new java.util.ArrayList<>();
+        Map<String, List<BalanceEvidence>> byAccount = new java.util.HashMap<>();
+        for (BalanceEvidence item : evidence) {
+            byAccount.computeIfAbsent(item.accountLast4(), ignored -> new java.util.ArrayList<>())
+                    .add(item);
+        }
+        for (List<BalanceEvidence> accountEvidence : byAccount.values()) {
+            accountEvidence.sort(Comparator.comparing(BalanceEvidence::occurredAt));
+            for (int i = 1; i < accountEvidence.size(); i++) {
+                BalanceEvidence previous = accountEvidence.get(i - 1);
+                BalanceEvidence current = accountEvidence.get(i);
+                BigDecimal movement = ledger.stream()
+                        .filter(t -> t.accountLast4().equals(current.accountLast4()))
+                        .filter(t -> t.occurredAt().isAfter(previous.occurredAt()))
+                        .filter(t -> !t.occurredAt().isAfter(current.occurredAt()))
+                        .map(t -> t.direction() == Direction.DEBIT
+                                ? t.amount().negate() : t.amount())
+                        .reduce(ZERO, BigDecimal::add);
+                BigDecimal expected = previous.balance().add(movement);
+                if (expected.compareTo(current.balance()) != 0) {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("account_last4", current.accountLast4());
+                    row.put("occurred_at", current.occurredAt().toString());
+                    row.put("amount", expected.subtract(current.balance()).abs().toPlainString());
+                    row.put("note", "bank balance evidence differs from ledger movement by "
+                            + expected.subtract(current.balance()).toPlainString()
+                            + " since " + previous.sourceMessageId());
+                    discrepancies.add(row);
+                }
+            }
+        }
+        Map<String, Object> document = new LinkedHashMap<>();
+        document.put("discrepancies", discrepancies);
+        return document;
     }
 
     public static Map<Category, BigDecimal> byCategory(List<NormalizedTxn> ledger) {

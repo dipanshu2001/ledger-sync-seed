@@ -15,7 +15,10 @@ import java.sql.Statement;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.TreeSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * The store this service has used since it was written: a single relational
@@ -78,18 +81,44 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
 
     @Override
     public void save(NormalizedTxn t) {
-        try (PreparedStatement ps = conn.prepareStatement(
+        try {
+            try (PreparedStatement find = conn.prepareStatement(
+                "SELECT id, source_message_ids FROM ledger WHERE account_last4 = ?"
+                        + " AND occurred_at = ? AND direction = ? AND amount = ?"
+                        + " AND merchant = ? ORDER BY id LIMIT 1")) {
+            find.setString(1, t.accountLast4());
+            find.setString(2, t.occurredAt().toString());
+            find.setString(3, t.direction().name());
+            find.setBigDecimal(4, t.amount());
+            find.setString(5, t.merchant());
+            try (ResultSet rs = find.executeQuery()) {
+                if (rs.next()) {
+                    TreeSet<String> ids = new TreeSet<>(Arrays.asList(
+                            rs.getString(2).split(",")));
+                    ids.addAll(t.sourceMessageIds());
+                    try (PreparedStatement update = conn.prepareStatement(
+                            "UPDATE ledger SET source_message_ids = ? WHERE id = ?")) {
+                        update.setString(1, String.join(",", ids));
+                        update.setLong(2, rs.getLong(1));
+                        update.executeUpdate();
+                    }
+                    return;
+                }
+            }
+        }
+            try (PreparedStatement insert = conn.prepareStatement(
                 "INSERT INTO ledger(account_last4, occurred_at, direction, amount,"
                         + " category, merchant, source_message_ids)"
                         + " VALUES (?,?,?,?,?,?,?)")) {
-            ps.setString(1, t.accountLast4());
-            ps.setString(2, t.occurredAt().toString());
-            ps.setString(3, t.direction().name());
-            ps.setBigDecimal(4, t.amount());
-            ps.setString(5, t.category().name());
-            ps.setString(6, t.merchant());
-            ps.setString(7, String.join(",", t.sourceMessageIds()));
-            ps.executeUpdate();
+            insert.setString(1, t.accountLast4());
+            insert.setString(2, t.occurredAt().toString());
+            insert.setString(3, t.direction().name());
+            insert.setBigDecimal(4, t.amount());
+            insert.setString(5, t.category().name());
+            insert.setString(6, t.merchant());
+            insert.setString(7, String.join(",", t.sourceMessageIds()));
+            insert.executeUpdate();
+            }
         } catch (SQLException e) {
             throw new IllegalStateException("could not save " + t, e);
         }
@@ -97,13 +126,13 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
 
     @Override
     public List<NormalizedTxn> all() {
-        List<NormalizedTxn> out = new ArrayList<>();
+        Map<String, NormalizedTxn> unique = new LinkedHashMap<>();
         try (Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(
                      "SELECT account_last4, occurred_at, direction, amount, category,"
                              + " merchant, source_message_ids FROM ledger ORDER BY occurred_at")) {
             while (rs.next()) {
-                out.add(new NormalizedTxn(
+                NormalizedTxn txn = new NormalizedTxn(
                         rs.getString(1),
                         OffsetDateTime.parse(rs.getString(2)),
                         Direction.valueOf(rs.getString(3)),
@@ -111,12 +140,25 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
                         Category.valueOf(rs.getString(5)),
                         rs.getString(6),
                         Arrays.stream(rs.getString(7).split(","))
-                                .filter(s -> !s.isBlank()).toList()));
+                                .filter(s -> !s.isBlank()).toList());
+                String key = String.join("|", txn.accountLast4(), txn.occurredAt().toString(),
+                        txn.direction().name(), txn.amount().toPlainString(),
+                        txn.merchant().trim().toUpperCase());
+                NormalizedTxn existing = unique.get(key);
+                if (existing == null) {
+                    unique.put(key, txn);
+                } else {
+                    TreeSet<String> ids = new TreeSet<>(existing.sourceMessageIds());
+                    ids.addAll(txn.sourceMessageIds());
+                    unique.put(key, new NormalizedTxn(existing.accountLast4(),
+                            existing.occurredAt(), existing.direction(), existing.amount(),
+                            existing.category(), existing.merchant(), List.copyOf(ids)));
+                }
             }
         } catch (SQLException e) {
             throw new IllegalStateException("could not read the ledger", e);
         }
-        return out;
+        return new ArrayList<>(unique.values());
     }
 
     @Override
@@ -126,6 +168,39 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
             return rs.next() ? rs.getLong(1) : 0L;
         } catch (SQLException e) {
             throw new IllegalStateException("could not count the ledger", e);
+        }
+    }
+
+    @Override
+    public void saveBalanceEvidence(BalanceEvidence evidence) {
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "MERGE INTO balance_evidence(account_last4, occurred_at, stated_balance,"
+                            + " source_message_id) KEY(source_message_id) VALUES (?,?,?,?)")) {
+                ps.setString(1, evidence.accountLast4());
+                ps.setString(2, evidence.occurredAt().toString());
+                ps.setBigDecimal(3, evidence.balance());
+                ps.setString(4, evidence.sourceMessageId());
+                ps.executeUpdate();
+            } catch (SQLException e) {
+                throw new IllegalStateException("could not save balance evidence", e);
+            }
+        }
+
+    @Override
+    public List<BalanceEvidence> balanceEvidence() {
+            List<BalanceEvidence> result = new ArrayList<>();
+            try (Statement st = conn.createStatement();
+                 ResultSet rs = st.executeQuery(
+                         "SELECT account_last4, occurred_at, stated_balance, source_message_id"
+                                 + " FROM balance_evidence ORDER BY occurred_at")) {
+                while (rs.next()) {
+                    result.add(new BalanceEvidence(rs.getString(1),
+                            OffsetDateTime.parse(rs.getString(2)),
+                            rs.getBigDecimal(3).setScale(2), rs.getString(4)));
+                }
+                return result;
+            } catch (SQLException e) {
+                throw new IllegalStateException("could not read balance evidence", e);
         }
     }
 

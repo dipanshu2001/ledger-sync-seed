@@ -13,6 +13,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -37,18 +38,26 @@ public final class IngestService {
 
     public Stats ingestFile(Path corpus) throws IOException {
         List<RawMessage> messages = readCorpus(corpus);
-        int parsed = 0;
         int skipped = 0;
+        Map<TransactionKey, List<ParsedTxn>> grouped = new LinkedHashMap<>();
         for (RawMessage m : messages) {
             Optional<ParsedTxn> p = parsers.parse(m);
             if (p.isEmpty()) {
                 skipped++;
                 continue;
             }
-            store.save(toTransaction(p.get()));
-            parsed++;
+            ParsedTxn txn = p.get();
+            if (txn.statedBalance() != null) {
+                store.saveBalanceEvidence(new in.simplifymoney.ledgersync.store.BalanceEvidence(
+                        txn.accountLast4(), txn.occurredAt(), txn.statedBalance(),
+                        txn.sourceMessageId()));
+            }
+            grouped.computeIfAbsent(TransactionKey.of(txn), ignored -> new ArrayList<>()).add(txn);
         }
-        return new Stats(messages.size(), parsed, skipped);
+        for (List<ParsedTxn> evidence : grouped.values()) {
+            store.save(toTransaction(evidence));
+        }
+        return new Stats(messages.size(), grouped.size(), skipped);
     }
 
     public static List<RawMessage> readCorpus(Path corpus) throws IOException {
@@ -68,11 +77,36 @@ public final class IngestService {
         return out;
     }
 
-    private NormalizedTxn toTransaction(ParsedTxn p) {
-        Category c = p.direction() == Direction.DEBIT ? Category.SPEND : Category.INCOME;
+    private NormalizedTxn toTransaction(List<ParsedTxn> evidence) {
+        ParsedTxn p = evidence.get(0);
+        Category c = categoryFor(p);
+        List<String> sourceIds = evidence.stream()
+                .map(ParsedTxn::sourceMessageId)
+                .sorted()
+                .toList();
         return new NormalizedTxn(p.accountLast4(), p.occurredAt(), p.direction(),
-                p.amount(), c, p.merchant(), List.of(p.sourceMessageId()));
+                p.amount(), c, p.merchant(), sourceIds);
+    }
+
+    private Category categoryFor(ParsedTxn p) {
+        String merchant = p.merchant().toUpperCase();
+        if (merchant.contains("PARAG KAPOOR")) return Category.TRANSFER;
+        if (p.direction() == Direction.DEBIT
+                && merchant.startsWith("UPI")
+                && p.amount().compareTo(new java.math.BigDecimal("100.00")) <= 0) {
+            return Category.MICRO;
+        }
+        return p.direction() == Direction.DEBIT ? Category.SPEND : Category.INCOME;
     }
 
     public record Stats(int messagesRead, int transactionsWritten, int messagesSkipped) {}
+
+    private record TransactionKey(String accountLast4, OffsetDateTime occurredAt,
+                                  Direction direction, java.math.BigDecimal amount,
+                                  String merchant) {
+        static TransactionKey of(ParsedTxn txn) {
+            return new TransactionKey(txn.accountLast4(), txn.occurredAt(),
+                    txn.direction(), txn.amount(), txn.merchant().trim().toUpperCase());
+        }
+    }
 }
